@@ -1,10 +1,10 @@
 <?php
 
 /**
- * Plugin Name: WooCommerce SKU Manager
+ * Plugin Name: WooCommerce SKU Manager (Safe Version)
  * Plugin URI: https://yasirshabbir.com
- * Description: Advanced SKU management system with logging and automated filtering for WooCommerce products
- * Version: 1.0.0
+ * Description: Advanced SKU management system with optimized logging and automated filtering for WooCommerce products
+ * Version: 1.2
  * Author: Yasir Shabbir
  * Author URI: https://yasirshabbir.com
  * License: GPL v2 or later
@@ -90,26 +90,91 @@ if (!function_exists('ysm_create_js_file')) {
         }
     };
     
-    // Logs functionality
+    // Simple logs functionality with better pagination
     let currentPage = 1;
-    let currentFilter = "";
+    let currentFilters = {
+        action_type: "",
+        search: "",
+        per_page: 50
+    };
     
-    function loadLogs(page = 1, filter = "") {
+    function loadLogs(page = 1, resetFilters = false) {
+        if (resetFilters) {
+            currentFilters = {
+                action_type: "",
+                search: "",
+                per_page: $("#per-page-select").val() || 50
+            };
+            currentPage = 1;
+        } else {
+            currentPage = page;
+        }
+        
+        $("#logs-loading").show();
+        $("#logs-table").hide();
+        $("#simple-pagination").empty();
+        
+        const filters = {
+            ...currentFilters,
+            action_type: $("#log-filter").val(),
+            search: $("#search-logs").val(),
+            per_page: $("#per-page-select").val() || 50
+        };
+        
+        // Add timeout and better error handling
         $.ajax({
             url: ysmAjax.ajaxurl,
             type: "POST",
             data: {
                 action: "ysm_get_logs",
-                page: page,
-                filter: filter,
+                page: currentPage,
+                filters: filters,
                 nonce: ysmAjax.nonce
             },
+            timeout: 30000, // 30 second timeout
             success: function(response) {
                 if (response.success) {
                     updateLogsTable(response.data);
-                    currentPage = page;
-                    currentFilter = filter;
+                    currentFilters = filters;
+                } else {
+                    $("#logs-loading").hide();
+                    $("#logs-table").show();
+                    $("#logs-table tbody").html(`
+                        <tr>
+                            <td colspan="7" style="text-align: center; color: red; padding: 2rem;">
+                                <strong>Error loading logs:</strong><br>
+                                ${response.data || "Unknown error occurred"}
+                                <br><br>
+                                <button class="ysm-btn ysm-btn-secondary" onclick="location.reload()">Reload Page</button>
+                            </td>
+                        </tr>
+                    `);
                 }
+            },
+            error: function(xhr, status, error) {
+                $("#logs-loading").hide();
+                $("#logs-table").show();
+                
+                let errorMessage = "Connection failed";
+                if (status === "timeout") {
+                    errorMessage = "Request timed out - too many logs to load at once";
+                } else if (xhr.status === 500) {
+                    errorMessage = "Server error - check error logs";
+                } else if (xhr.status === 0) {
+                    errorMessage = "Network connection failed";
+                }
+                
+                $("#logs-table tbody").html(`
+                    <tr>
+                        <td colspan="7" style="text-align: center; color: red; padding: 2rem;">
+                            <strong>Failed to load logs:</strong><br>
+                            ${errorMessage}
+                            <br><br>
+                            <button class="ysm-btn ysm-btn-secondary" onclick="loadLogs(1, true)">Try Again</button>
+                            <button class="ysm-btn ysm-btn-secondary" onclick="location.reload()">Reload Page</button>
+                        </td>
+                    </tr>
+                `);
             }
         });
     }
@@ -119,45 +184,127 @@ if (!function_exists('ysm_create_js_file')) {
         tbody.empty();
         
         if (data.logs.length === 0) {
-            tbody.append("<tr><td colspan=\"6\" style=\"text-align: center; color: var(--secondary-text);\">No logs found</td></tr>");
+            tbody.append("<tr><td colspan=\"7\" style=\"text-align: center; color: var(--secondary-text); padding: 3rem;\">No logs found</td></tr>");
+            $("#simple-pagination").empty();
             return;
         }
         
         data.logs.forEach(log => {
+            const actionBadge = getActionBadge(log.action_type);
             const row = `
                 <tr>
-                    <td><span class="ysm-badge ysm-badge-info">${log.action_type}</span></td>
+                    <td>${actionBadge}</td>
                     <td>${log.product_id || "-"}</td>
-                    <td><code>${log.product_sku || "-"}</code></td>
-                    <td>${log.product_title || "-"}</td>
-                    <td>${log.message}</td>
-                    <td>${log.created_at}</td>
+                    <td>${log.product_sku ? `<code>${log.product_sku}</code>` : "-"}</td>
+                    <td title="${log.product_title || ""}">${truncateText(log.product_title || "-", 30)}</td>
+                    <td title="${log.message}">${truncateText(log.message, 50)}</td>
+                    <td><span class="ysm-badge ysm-badge-info">${log.user_type}</span></td>
+                    <td>${formatDateTime(log.created_at)}</td>
                 </tr>
             `;
             tbody.append(row);
         });
         
-        updatePagination(data);
+        updateSimplePagination(data);
     }
     
-    function updatePagination(data) {
-        const pagination = $(".ysm-pagination");
+    function getActionBadge(actionType) {
+        const badges = {
+            "product_deleted": `<span class="ysm-badge ysm-badge-danger">Deleted</span>`,
+            "product_trashed": `<span class="ysm-badge ysm-badge-warning">Trashed</span>`,
+            "blocked_sku_added": `<span class="ysm-badge ysm-badge-secondary">SKU Blocked</span>`,
+            "cleanup_completed": `<span class="ysm-badge ysm-badge-success">Cleanup</span>`,
+            "product_processed": `<span class="ysm-badge ysm-badge-info">Processed</span>`
+        };
+        
+        return badges[actionType] || `<span class="ysm-badge ysm-badge-info">${actionType}</span>`;
+    }
+    
+    function truncateText(text, length) {
+        if (!text || text.length <= length) return text;
+        return text.substring(0, length) + "...";
+    }
+    
+    function formatDateTime(datetime) {
+        const date = new Date(datetime);
+        return date.toLocaleDateString() + " " + date.toLocaleTimeString();
+    }
+    
+    // Simple pagination - max 10 buttons
+    function updateSimplePagination(data) {
+        const pagination = $("#simple-pagination");
         pagination.empty();
         
         const totalPages = Math.ceil(data.total / data.per_page);
         
         if (totalPages <= 1) return;
         
-        for (let i = 1; i <= totalPages; i++) {
-            const button = $(`<button class="ysm-btn ${i === data.page ? "ysm-btn-primary" : "ysm-btn-secondary"}">${i}</button>`);
-            button.on("click", () => loadLogs(i, currentFilter));
-            pagination.append(button);
+        // Show page info
+        const pageInfo = `<span class="page-info">Page ${data.page} of ${totalPages.toLocaleString()} (${data.total.toLocaleString()} total)</span>`;
+        pagination.append(pageInfo);
+        
+        const buttonsDiv = $("<div class=\"pagination-buttons\"></div>");
+        
+        // First and Previous
+        if (data.page > 1) {
+            buttonsDiv.append(`<button class="ysm-btn ysm-btn-secondary" onclick="loadLogs(1)">First</button>`);
+            buttonsDiv.append(`<button class="ysm-btn ysm-btn-secondary" onclick="loadLogs(${data.page - 1})">Prev</button>`);
         }
+        
+        // Current page indicator
+        buttonsDiv.append(`<span class="current-page">Page ${data.page}</span>`);
+        
+        // Next and Last
+        if (data.page < totalPages) {
+            buttonsDiv.append(`<button class="ysm-btn ysm-btn-secondary" onclick="loadLogs(${data.page + 1})">Next</button>`);
+            buttonsDiv.append(`<button class="ysm-btn ysm-btn-secondary" onclick="loadLogs(${totalPages})">Last</button>`);
+        }
+        
+        // Jump to page (for large datasets)
+        if (totalPages > 10) {
+            const jumpDiv = $(`
+                <div class="jump-to-page">
+                    <label>Go to page:</label>
+                    <input type="number" id="jump-page" min="1" max="${totalPages}" placeholder="${data.page}" style="width: 80px;">
+                    <button class="ysm-btn ysm-btn-secondary" onclick="jumpToPage()">Go</button>
+                </div>
+            `);
+            buttonsDiv.append(jumpDiv);
+        }
+        
+        pagination.append(buttonsDiv);
     }
     
-    // Filter logs
-    $("#log-filter").on("change", function() {
-        loadLogs(1, $(this).val());
+    // Global function for jumping to page
+    window.loadLogs = loadLogs;
+    window.jumpToPage = function() {
+        const page = parseInt($("#jump-page").val());
+        const maxPage = parseInt($("#jump-page").attr("max"));
+        if (page >= 1 && page <= maxPage) {
+            loadLogs(page);
+        }
+    };
+    
+    // Filter events
+    $("#log-filter, #per-page-select").on("change", function() {
+        loadLogs(1, true);
+    });
+    
+    // Search with delay
+    let searchTimeout;
+    $("#search-logs").on("keyup", function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            loadLogs(1, true);
+        }, 500);
+    });
+    
+    // Clear filters
+    $("#clear-filters").on("click", function() {
+        $("#log-filter").val("");
+        $("#search-logs").val("");
+        $("#per-page-select").val("50");
+        loadLogs(1, true);
     });
     
     // Clear logs
@@ -172,7 +319,7 @@ if (!function_exists('ysm_create_js_file')) {
                 },
                 success: function(response) {
                     if (response.success) {
-                        loadLogs();
+                        loadLogs(1, true);
                         alert("Logs cleared successfully!");
                     }
                 }
@@ -180,12 +327,12 @@ if (!function_exists('ysm_create_js_file')) {
         }
     });
     
-    // Load logs on page load if on logs page
+    // Load logs on page load
     if ($("#logs-table").length) {
-        loadLogs();
+        loadLogs(1, true);
     }
     
-    // Settings toggle functionality
+    // Settings toggle
     $(".ysm-setting-toggle").on("change", function() {
         const setting = $(this).data("setting");
         const value = $(this).is(":checked") ? "1" : "0";
@@ -201,7 +348,6 @@ if (!function_exists('ysm_create_js_file')) {
             },
             success: function(response) {
                 if (response.success) {
-                    // Show success indicator
                     const indicator = $("<span class=\"ysm-success-indicator\">✓</span>");
                     $(this).parent().append(indicator);
                     setTimeout(() => indicator.fadeOut(), 2000);
@@ -211,7 +357,7 @@ if (!function_exists('ysm_create_js_file')) {
     });
 });';
 
-        // Create assets directory if it doesn\'t exist
+        // Create assets directory if it doesn't exist
         if (!file_exists(YSM_PLUGIN_DIR . "assets/")) {
             wp_mkdir_p(YSM_PLUGIN_DIR . "assets/");
         }
@@ -223,7 +369,7 @@ if (!function_exists('ysm_create_js_file')) {
     // Create JS file on activation
     register_activation_hook(__FILE__, "ysm_create_js_file");
 
-    // Also create it on init if it doesn\'t exist
+    // Also create it on init if it doesn't exist
     add_action("init", function () {
         if (!file_exists(YSM_PLUGIN_DIR . "assets/admin.js")) {
             ysm_create_js_file();
@@ -232,14 +378,13 @@ if (!function_exists('ysm_create_js_file')) {
 }
 
 // Define plugin constants
-define('YSM_VERSION', '1.0.0');
+define('YSM_VERSION', '1.0.1');
 define('YSM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('YSM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('YSM_PLUGIN_FILE', __FILE__);
 
 class YasirSKUManager
 {
-
     private $table_logs;
     private $table_blocked_skus;
     private $table_settings;
@@ -338,7 +483,7 @@ class YasirSKUManager
 
         $charset_collate = $wpdb->get_charset_collate();
 
-        // Logs table
+        // Logs table with basic indexing
         $sql_logs = "CREATE TABLE IF NOT EXISTS {$this->table_logs} (
             id int(11) NOT NULL AUTO_INCREMENT,
             action_type varchar(50) NOT NULL,
@@ -835,41 +980,91 @@ class YasirSKUManager
         $this->render_settings();
     }
 
-    // AJAX handlers
+    // Simple AJAX handlers with better error handling
     public function ajax_get_logs()
     {
-        check_ajax_referer('ysm_nonce', 'nonce');
+        // Add more debugging and error handling
+        if (!check_ajax_referer('ysm_nonce', 'nonce', false)) {
+            wp_send_json_error('Invalid nonce');
+            return;
+        }
 
         global $wpdb;
 
-        $page = isset($_POST['page']) ? (int) $_POST['page'] : 1;
-        $per_page = 20;
-        $offset = ($page - 1) * $per_page;
+        try {
+            $page = isset($_POST['page']) ? max(1, intval($_POST['page'])) : 1;
+            $filters = isset($_POST['filters']) ? $_POST['filters'] : array();
 
-        $filter = isset($_POST['filter']) ? sanitize_text_field($_POST['filter']) : '';
+            $per_page = isset($filters['per_page']) ? max(10, min(250, intval($filters['per_page']))) : 50;
+            $offset = ($page - 1) * $per_page;
 
-        $where_clause = '';
-        if (!empty($filter)) {
-            $where_clause = $wpdb->prepare("WHERE action_type = %s", $filter);
+            // Build WHERE clause - simplified to prevent timeouts
+            $where_conditions = array();
+            $where_values = array();
+
+            if (!empty($filters['action_type'])) {
+                $where_conditions[] = "action_type = %s";
+                $where_values[] = sanitize_text_field($filters['action_type']);
+            }
+
+            if (!empty($filters['search'])) {
+                $search_term = '%' . $wpdb->esc_like(sanitize_text_field($filters['search'])) . '%';
+                $where_conditions[] = "product_sku LIKE %s";
+                $where_values[] = $search_term;
+            }
+
+            $where_clause = '';
+            if (!empty($where_conditions)) {
+                $where_clause = "WHERE " . implode(" AND ", $where_conditions);
+            }
+
+            // Get logs with timeout protection
+            $query = "SELECT * FROM {$this->table_logs} {$where_clause} ORDER BY id DESC LIMIT %d OFFSET %d";
+            $where_values[] = $per_page;
+            $where_values[] = $offset;
+
+            if (!empty($where_values)) {
+                $logs = $wpdb->get_results($wpdb->prepare($query, ...$where_values));
+            } else {
+                $logs = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_logs} ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset));
+            }
+
+            if ($logs === false) {
+                wp_send_json_error('Database query failed: ' . $wpdb->last_error);
+                return;
+            }
+
+            // Use approximate count for performance
+            $total = 0;
+            if ($page == 1 && empty($where_conditions)) {
+                // Fast approximate count for first page
+                $count_result = $wpdb->get_row("SELECT table_rows FROM information_schema.tables WHERE table_name = '{$this->table_logs}' AND table_schema = DATABASE()");
+                $total = $count_result ? $count_result->table_rows : 0;
+
+                // Fallback to exact count if estimate not available
+                if (!$total) {
+                    $total = $wpdb->get_var("SELECT COUNT(*) FROM {$this->table_logs}");
+                }
+            } else {
+                // For filtered results or other pages, use exact count but limit it
+                $count_query = "SELECT COUNT(*) FROM {$this->table_logs} {$where_clause}";
+                if (!empty($where_conditions)) {
+                    $count_values = array_slice($where_values, 0, -2);
+                    $total = $wpdb->get_var($wpdb->prepare($count_query, ...$count_values));
+                } else {
+                    $total = $wpdb->get_var($count_query);
+                }
+            }
+
+            wp_send_json_success(array(
+                'logs' => $logs ? $logs : array(),
+                'total' => intval($total),
+                'page' => $page,
+                'per_page' => $per_page
+            ));
+        } catch (Exception $e) {
+            wp_send_json_error('Server error: ' . $e->getMessage());
         }
-
-        $logs = $wpdb->get_results("
-            SELECT * FROM {$this->table_logs} 
-            {$where_clause}
-            ORDER BY created_at DESC 
-            LIMIT {$per_page} OFFSET {$offset}
-        ");
-
-        $total = $wpdb->get_var("
-            SELECT COUNT(*) FROM {$this->table_logs} {$where_clause}
-        ");
-
-        wp_send_json_success(array(
-            'logs' => $logs,
-            'total' => $total,
-            'page' => $page,
-            'per_page' => $per_page
-        ));
     }
 
     public function ajax_clear_logs()
@@ -1042,8 +1237,7 @@ class YasirSKUManager
 
     <div class="ysm-footer">
         <p><?php _e("Developed by", "yasir-sku-manager"); ?> <a href="https://yasirshabbir.com" target="_blank">Yasir
-                Shabbir</a>
-        </p>
+                Shabbir</a></p>
     </div>
 </div>
 <?php
@@ -1153,41 +1347,157 @@ class YasirSKUManager
 
     private function render_logs()
     {
+        // Get logs directly via PHP to bypass AJAX issues
+        global $wpdb;
+
+        // Handle pagination via URL parameters
+        $current_page = isset($_GET['logs_page']) ? max(1, intval($_GET['logs_page'])) : 1;
+        $per_page = isset($_GET['per_page']) ? max(10, min(100, intval($_GET['per_page']))) : 25;
+        $search = isset($_GET['search']) ? sanitize_text_field($_GET['search']) : '';
+        $action_filter = isset($_GET['action_filter']) ? sanitize_text_field($_GET['action_filter']) : '';
+
+        $offset = ($current_page - 1) * $per_page;
+
+        // Build query conditions
+        $where_conditions = array();
+        $where_values = array();
+
+        if (!empty($action_filter)) {
+            $where_conditions[] = "action_type = %s";
+            $where_values[] = $action_filter;
+        }
+
+        if (!empty($search)) {
+            $search_term = '%' . $wpdb->esc_like($search) . '%';
+            $where_conditions[] = "product_sku LIKE %s";
+            $where_values[] = $search_term;
+        }
+
+        $where_clause = '';
+        if (!empty($where_conditions)) {
+            $where_clause = "WHERE " . implode(" AND ", $where_conditions);
+        }
+
+        // Get total count (with limit to prevent timeouts)
+        try {
+            if (empty($where_conditions)) {
+                // Fast count for unfiltered results
+                $total_logs = $wpdb->get_var("SELECT COUNT(*) FROM {$this->table_logs} LIMIT 50000");
+            } else {
+                $count_query = "SELECT COUNT(*) FROM {$this->table_logs} {$where_clause}";
+                $total_logs = $wpdb->get_var($wpdb->prepare($count_query, ...$where_values));
+            }
+        } catch (Exception $e) {
+            $total_logs = 0;
+        }
+
+        // Get logs
+        try {
+            $query = "SELECT * FROM {$this->table_logs} {$where_clause} ORDER BY id DESC LIMIT %d OFFSET %d";
+            $query_values = array_merge($where_values, array($per_page, $offset));
+
+            if (!empty($query_values)) {
+                $logs = $wpdb->get_results($wpdb->prepare($query, ...$query_values));
+            } else {
+                $logs = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_logs} ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset));
+            }
+        } catch (Exception $e) {
+            $logs = array();
+            $error_message = "Database error: " . $e->getMessage();
+        }
+
+        $total_pages = ceil($total_logs / $per_page);
+
     ?>
 <div class="wrap ysm-admin-wrap">
     <div class="ysm-header">
         <div class="ysm-header-content">
             <h1><?php _e("Activity Logs", "yasir-sku-manager"); ?></h1>
             <div class="ysm-header-actions">
-                <button type="button" class="ysm-btn ysm-btn-danger" id="clear-logs">
+                <?php if ($total_logs > 0): ?>
+                <a href="<?php echo wp_nonce_url(add_query_arg(array('clear_all_logs' => '1')), 'ysm_clear_logs'); ?>"
+                    class="ysm-btn ysm-btn-danger"
+                    onclick="return confirm('Are you sure you want to clear all logs? This cannot be undone.')">
                     <span class="dashicons dashicons-trash"></span>
                     <?php _e("Clear All Logs", "yasir-sku-manager"); ?>
-                </button>
+                </a>
+                <?php endif; ?>
             </div>
         </div>
     </div>
 
     <div class="ysm-content">
+        <!-- Handle clear logs action -->
+        <?php
+                if (isset($_GET['clear_all_logs']) && wp_verify_nonce($_GET['_wpnonce'], 'ysm_clear_logs')) {
+                    $deleted = $wpdb->query("DELETE FROM {$this->table_logs}");
+                    echo '<div class="notice notice-success"><p>Cleared ' . number_format($deleted) . ' log entries.</p></div>';
+                    $this->log_action('logs_cleared', 'All logs cleared by admin', 'admin');
+                    // Refresh the page
+                    echo '<script>window.location.href = "' . admin_url('admin.php?page=yasir-sku-manager-logs') . '";</script>';
+                }
+                ?>
+
         <div class="ysm-card">
             <div class="ysm-card-header">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h2><?php _e("System Activity", "yasir-sku-manager"); ?></h2>
-                    <div>
-                        <select id="log-filter" class="ysm-input" style="width: auto; min-width: 200px;">
+                <div class="ysm-logs-controls">
+                    <!-- Filter Form -->
+                    <form method="get" class="ysm-logs-filters">
+                        <input type="hidden" name="page" value="yasir-sku-manager-logs">
+
+                        <select name="action_filter" class="ysm-input">
                             <option value=""><?php _e("All Actions", "yasir-sku-manager"); ?></option>
-                            <option value="product_deleted"><?php _e("Products Deleted", "yasir-sku-manager"); ?>
-                            </option>
-                            <option value="product_trashed"><?php _e("Products Trashed", "yasir-sku-manager"); ?>
-                            </option>
-                            <option value="blocked_sku_added"><?php _e("SKUs Blocked", "yasir-sku-manager"); ?></option>
-                            <option value="cleanup_completed"><?php _e("Cleanups", "yasir-sku-manager"); ?></option>
+                            <option value="product_deleted" <?php selected($action_filter, 'product_deleted'); ?>>
+                                <?php _e("Products Deleted", "yasir-sku-manager"); ?></option>
+                            <option value="product_trashed" <?php selected($action_filter, 'product_trashed'); ?>>
+                                <?php _e("Products Trashed", "yasir-sku-manager"); ?></option>
+                            <option value="blocked_sku_added" <?php selected($action_filter, 'blocked_sku_added'); ?>>
+                                <?php _e("SKUs Blocked", "yasir-sku-manager"); ?></option>
+                            <option value="cleanup_completed" <?php selected($action_filter, 'cleanup_completed'); ?>>
+                                <?php _e("Cleanups", "yasir-sku-manager"); ?></option>
                         </select>
-                    </div>
+
+                        <input type="text" name="search" class="ysm-input" value="<?php echo esc_attr($search); ?>"
+                            placeholder="<?php _e("Search SKU...", "yasir-sku-manager"); ?>">
+
+                        <select name="per_page" class="ysm-input">
+                            <option value="25" <?php selected($per_page, 25); ?>>25 per page</option>
+                            <option value="50" <?php selected($per_page, 50); ?>>50 per page</option>
+                            <option value="100" <?php selected($per_page, 100); ?>>100 per page</option>
+                        </select>
+
+                        <button type="submit"
+                            class="ysm-btn ysm-btn-secondary"><?php _e("Filter", "yasir-sku-manager"); ?></button>
+
+                        <?php if (!empty($search) || !empty($action_filter)): ?>
+                        <a href="<?php echo admin_url('admin.php?page=yasir-sku-manager-logs'); ?>"
+                            class="ysm-btn ysm-btn-secondary">
+                            <?php _e("Clear Filters", "yasir-sku-manager"); ?>
+                        </a>
+                        <?php endif; ?>
+                    </form>
                 </div>
             </div>
             <div class="ysm-card-content">
+                <?php if (isset($error_message)): ?>
+                <div class="notice notice-error">
+                    <p><strong>Error:</strong> <?php echo esc_html($error_message); ?></p>
+                    <p>Try reducing the per-page count or clearing old logs.</p>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($total_logs > 0): ?>
+                <div class="logs-info" style="margin-bottom: 1rem; color: #666;">
+                    Showing <?php echo number_format(min($total_logs, $per_page)); ?> of
+                    <?php echo number_format($total_logs); ?> logs
+                    <?php if ($total_pages > 1): ?>
+                    (Page <?php echo $current_page; ?> of <?php echo number_format($total_pages); ?>)
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
                 <div class="ysm-table-responsive">
-                    <table class="ysm-table" id="logs-table">
+                    <table class="ysm-table">
                         <thead>
                             <tr>
                                 <th><?php _e("Action", "yasir-sku-manager"); ?></th>
@@ -1199,38 +1509,180 @@ class YasirSKUManager
                             </tr>
                         </thead>
                         <tbody>
+                            <?php if (empty($logs)): ?>
                             <tr>
-                                <td colspan="6" style="text-align: center; padding: 2rem;">
-                                    <span class="dashicons dashicons-update-alt"
-                                        style="animation: spin 1s linear infinite;"></span>
-                                    <?php _e("Loading logs...", "yasir-sku-manager"); ?>
+                                <td colspan="6" style="text-align: center; padding: 3rem; color: #666;">
+                                    <?php if ($total_logs == 0): ?>
+                                    No logs found. The plugin will start logging activity as products are processed.
+                                    <?php else: ?>
+                                    No logs match your current filters.
+                                    <?php endif; ?>
                                 </td>
                             </tr>
+                            <?php else: ?>
+                            <?php foreach ($logs as $log): ?>
+                            <tr>
+                                <td>
+                                    <?php
+                                                    $badge_class = 'ysm-badge-info';
+                                                    $badge_text = ucfirst(str_replace('_', ' ', $log->action_type));
+
+                                                    if (strpos($log->action_type, 'deleted') !== false) {
+                                                        $badge_class = 'ysm-badge-danger';
+                                                        $badge_text = 'Deleted';
+                                                    } elseif (strpos($log->action_type, 'trashed') !== false) {
+                                                        $badge_class = 'ysm-badge-warning';
+                                                        $badge_text = 'Trashed';
+                                                    } elseif (strpos($log->action_type, 'cleanup') !== false) {
+                                                        $badge_class = 'ysm-badge-success';
+                                                        $badge_text = 'Cleanup';
+                                                    }
+                                                    ?>
+                                    <span
+                                        class="ysm-badge <?php echo $badge_class; ?>"><?php echo esc_html($badge_text); ?></span>
+                                </td>
+                                <td><?php echo $log->product_id ? esc_html($log->product_id) : '-'; ?></td>
+                                <td><?php echo $log->product_sku ? '<code>' . esc_html($log->product_sku) . '</code>' : '-'; ?>
+                                </td>
+                                <td title="<?php echo esc_attr($log->product_title); ?>">
+                                    <?php
+                                                    $title = $log->product_title ?: '-';
+                                                    echo esc_html(strlen($title) > 30 ? substr($title, 0, 30) . '...' : $title);
+                                                    ?>
+                                </td>
+                                <td title="<?php echo esc_attr($log->message); ?>">
+                                    <?php echo esc_html(strlen($log->message) > 50 ? substr($log->message, 0, 50) . '...' : $log->message); ?>
+                                </td>
+                                <td><?php echo esc_html(date('Y-m-d H:i:s', strtotime($log->created_at))); ?></td>
+                            </tr>
+                            <?php endforeach; ?>
+                            <?php endif; ?>
                         </tbody>
                     </table>
                 </div>
-                <div class="ysm-pagination" style="margin-top: 1rem; text-align: center;"></div>
+
+                <!-- Simple Pagination -->
+                <?php if ($total_pages > 1): ?>
+                <div style="margin-top: 2rem; text-align: center;">
+                    <div class="pagination-info" style="margin-bottom: 1rem; color: #666;">
+                        Page <?php echo $current_page; ?> of <?php echo number_format($total_pages); ?>
+                    </div>
+
+                    <div class="pagination-buttons"
+                        style="display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap;">
+                        <?php if ($current_page > 1): ?>
+                        <a href="<?php echo add_query_arg(array_merge($_GET, array('logs_page' => 1))); ?>"
+                            class="ysm-btn ysm-btn-secondary">First</a>
+                        <a href="<?php echo add_query_arg(array_merge($_GET, array('logs_page' => $current_page - 1))); ?>"
+                            class="ysm-btn ysm-btn-secondary">Previous</a>
+                        <?php endif; ?>
+
+                        <span class="ysm-btn ysm-btn-primary">Page <?php echo $current_page; ?></span>
+
+                        <?php if ($current_page < $total_pages): ?>
+                        <a href="<?php echo add_query_arg(array_merge($_GET, array('logs_page' => $current_page + 1))); ?>"
+                            class="ysm-btn ysm-btn-secondary">Next</a>
+                        <a href="<?php echo add_query_arg(array_merge($_GET, array('logs_page' => $total_pages))); ?>"
+                            class="ysm-btn ysm-btn-secondary">Last</a>
+                        <?php endif; ?>
+                    </div>
+
+                    <?php if ($total_pages > 10): ?>
+                    <div style="margin-top: 1rem;">
+                        <form method="get" style="display: inline-flex; gap: 0.5rem; align-items: center;">
+                            <?php foreach ($_GET as $key => $value): ?>
+                            <?php if ($key !== 'logs_page'): ?>
+                            <input type="hidden" name="<?php echo esc_attr($key); ?>"
+                                value="<?php echo esc_attr($value); ?>">
+                            <?php endif; ?>
+                            <?php endforeach; ?>
+                            <label>Jump to page:</label>
+                            <input type="number" name="logs_page" min="1" max="<?php echo $total_pages; ?>"
+                                placeholder="<?php echo $current_page; ?>" style="width: 80px; padding: 0.5rem;">
+                            <button type="submit" class="ysm-btn ysm-btn-secondary">Go</button>
+                        </form>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
             </div>
         </div>
+
+        <!-- Debug Information -->
+        <?php if (current_user_can('manage_options')): ?>
+        <div class="ysm-card" style="margin-top: 2rem;">
+            <div class="ysm-card-header">
+                <h2>Debug Information</h2>
+            </div>
+            <div class="ysm-card-content">
+                <p><strong>Database Status:</strong>
+                    <?php
+                                try {
+                                    $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->table_logs}'");
+                                    echo $table_exists ? 'Table exists' : 'Table missing';
+                                } catch (Exception $e) {
+                                    echo 'Error: ' . $e->getMessage();
+                                }
+                                ?>
+                </p>
+
+                <p><strong>Total Logs in Database:</strong> <?php echo number_format($total_logs); ?></p>
+
+                <p><strong>Current Query:</strong>
+                    <?php if (isset($wpdb->last_query)): ?>
+                    <code><?php echo esc_html($wpdb->last_query); ?></code>
+                    <?php else: ?>
+                    No query executed
+                    <?php endif; ?>
+                </p>
+
+                <?php if (!empty($search) || !empty($action_filter)): ?>
+                <p><strong>Active Filters:</strong>
+                    <?php if (!empty($action_filter)): ?>Action: <?php echo esc_html($action_filter); ?> |
+                    <?php endif; ?>
+                    <?php if (!empty($search)): ?>Search: <?php echo esc_html($search); ?><?php endif; ?>
+                </p>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
     </div>
 </div>
 
 <style>
-@keyframes spin {
-    from {
-        transform: rotate(0deg);
-    }
-
-    to {
-        transform: rotate(360deg);
-    }
+.ysm-logs-filters {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+    width: 100%;
 }
 
-.ysm-pagination {
-    display: flex;
-    justify-content: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
+.ysm-logs-filters .ysm-input {
+    width: auto;
+    min-width: 150px;
+}
+
+.logs-info {
+    background: #f5f5f5;
+    padding: 0.75rem;
+    border-radius: 3px;
+    font-size: 0.9rem;
+}
+
+@media (max-width: 768px) {
+    .ysm-logs-filters {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .ysm-logs-filters .ysm-input {
+        width: 100%;
+    }
+
+    .pagination-buttons {
+        flex-direction: column;
+    }
 }
 </style>
 <?php
@@ -1302,13 +1754,16 @@ class YasirSKUManager
                                 <select name="cleanup_schedule" id="cleanup_schedule" class="ysm-input">
                                     <option value="hourly"
                                         <?php selected($this->get_setting("cleanup_schedule"), "hourly"); ?>>
-                                        <?php _e("Every Hour", "yasir-sku-manager"); ?></option>
+                                        <?php _e("Every Hour", "yasir-sku-manager"); ?>
+                                    </option>
                                     <option value="twicedaily"
                                         <?php selected($this->get_setting("cleanup_schedule"), "twicedaily"); ?>>
-                                        <?php _e("Twice Daily", "yasir-sku-manager"); ?></option>
+                                        <?php _e("Twice Daily", "yasir-sku-manager"); ?>
+                                    </option>
                                     <option value="daily"
                                         <?php selected($this->get_setting("cleanup_schedule"), "daily"); ?>>
-                                        <?php _e("Daily", "yasir-sku-manager"); ?></option>
+                                        <?php _e("Daily", "yasir-sku-manager"); ?>
+                                    </option>
                                 </select>
                             </div>
 
@@ -1337,7 +1792,7 @@ class YasirSKUManager
 <?php
     }
 
-    // Get admin CSS
+    // Simple admin CSS
     private function get_admin_css()
     {
         return '
@@ -1582,6 +2037,11 @@ class YasirSKUManager
             color: var(--primary-text);
         }
 
+        .ysm-badge-danger {
+            background: var(--danger-color);
+            color: var(--primary-text);
+        }
+
         .ysm-badge-secondary {
             background: var(--secondary-color);
             color: var(--primary-text);
@@ -1701,6 +2161,12 @@ class YasirSKUManager
             transform: translateX(5px);
         }
 
+        .ysm-success-indicator {
+            color: var(--success-color);
+            font-size: 0.75rem;
+            margin-left: 0.5rem;
+        }
+
         /* Responsive Design */
         @media (max-width: 768px) {
             .ysm-two-column {
@@ -1724,3 +2190,5 @@ class YasirSKUManager
         ';
     }
 }
+
+?>
